@@ -1,0 +1,344 @@
+AWSTemplateFormatVersion: "2010-09-09"
+Description: "Colombia Explora - Serverless Architecture on AWS"
+
+Parameters:
+  ProjectName:
+    Type: String
+    Default: "colombia-explora"
+    Description: "Nombre del proyecto"
+
+  Environment:
+    Type: String
+    Default: "prod"
+    AllowedValues: ["dev", "staging", "prod"]
+    Description: "Entorno de despliegue"
+
+  DBUsername:
+    Type: String
+    Default: "explora_user"
+    NoEcho: true
+    Description: "Usuario de la base de datos"
+
+  DBPassword:
+    Type: String
+    Default: "ExploraPass123!"
+    NoEcho: true
+    Description: "Contraseña de la base de datos"
+    MinLength: 8
+
+  JWTSecret:
+    Type: String
+    Default: "your-super-secret-jwt-key-change-in-production"
+    NoEcho: true
+    Description: "Secret key para JWT tokens"
+
+  AdminEmail:
+    Type: String
+    Default: "admin@example.com"
+    Description: "Email para notificaciones de alertas"
+
+Resources:
+  # ==================== S3 BUCKET (Frontend) ====================
+  FrontendBucket:
+    Type: AWS::S3::Bucket
+    Properties:
+      BucketName: !Sub "${ProjectName}-frontend-${Environment}"
+      WebsiteConfiguration:
+        IndexDocument: index.html
+        ErrorDocument: index.html
+      PublicAccessBlockConfiguration:
+        BlockPublicAcls: false
+        BlockPublicPolicy: false
+        IgnorePublicAcls: false
+        RestrictPublicBuckets: false
+      CorsConfiguration:
+        CorsRules:
+          - AllowedHeaders: ["*"]
+            AllowedMethods: ["GET", "HEAD"]
+            AllowedOrigins: ["*"]
+            MaxAge: 3000
+
+  FrontendBucketPolicy:
+    Type: AWS::S3::BucketPolicy
+    Properties:
+      Bucket: !Ref FrontendBucket
+      PolicyDocument:
+        Statement:
+          - Effect: Allow
+            Principal: "*"
+            Action: "s3:GetObject"
+            Resource: !Sub "${FrontendBucket.Arn}/*"
+
+  # ==================== CLOUDFRONT (CDN) ====================
+  CloudFrontDistribution:
+    Type: AWS::CloudFront::Distribution
+    Properties:
+      DistributionConfig:
+        Origins:
+          - DomainName: !GetAtt FrontendBucket.DomainName
+            Id: S3Origin
+            S3OriginConfig:
+              OriginAccessIdentity: ""
+        Enabled: true
+        DefaultRootObject: index.html
+        DefaultCacheBehavior:
+          TargetOriginId: S3Origin
+          ViewerProtocolPolicy: redirect-to-https
+          AllowedMethods: ["GET", "HEAD", "OPTIONS"]
+          CachedMethods: ["GET", "HEAD", "OPTIONS"]
+          ForwardedValues:
+            QueryString: false
+            Cookies:
+              Forward: none
+          MinTTL: 0
+          MaxTTL: 86400
+          DefaultTTL: 3600
+        CustomErrorResponses:
+          - ErrorCode: 404
+            ResponseCode: 200
+            ResponsePagePath: /index.html
+          - ErrorCode: 403
+            ResponseCode: 200
+            ResponsePagePath: /index.html
+
+  # ==================== DATABASE (RDS PostgreSQL) ====================
+  DatabaseSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: !Sub "Security group for ${ProjectName} RDS database"
+      SecurityGroupIngress:
+        - IpProtocol: tcp
+          FromPort: 5432
+          ToPort: 5432
+          CidrIp: 0.0.0.0/0
+      Tags:
+        - Key: Name
+          Value: !Sub "${ProjectName}-db-sg-${Environment}"
+
+  Database:
+    Type: AWS::RDS::DBInstance
+    Properties:
+      DBName: !Sub "${ProjectName}_${Environment}"
+      DBInstanceIdentifier: !Sub "${ProjectName}-db-${Environment}"
+      Engine: postgres
+      EngineVersion: "15.4"
+      DBInstanceClass: db.t3.micro
+      MasterUsername: !Ref DBUsername
+      MasterUserPassword: !Ref DBPassword
+      AllocatedStorage: 20
+      MaxAllocatedStorage: 100
+      StorageType: gp2
+      PubliclyAccessible: true
+      VPCSecurityGroups:
+        - !GetAtt DatabaseSecurityGroup.GroupId
+      BackupRetentionPeriod: 7
+      MultiAZ: false
+      DeletionPolicy: Snapshot
+      Tags:
+        - Key: Name
+          Value: !Sub "${ProjectName}-database-${Environment}"
+        - Key: Environment
+          Value: !Ref Environment
+
+  # ==================== LAMBDA (Backend) ====================
+  LambdaExecutionRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub "${ProjectName}-lambda-role-${Environment}"
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: lambda.amazonaws.com
+            Action: "sts:AssumeRole"
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole
+        - arn:aws:iam::aws:policy/AmazonRDSDataFullAccess
+      Policies:
+        - PolicyName: !Sub "${ProjectName}-lambda-policy-${Environment}"
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Effect: Allow
+                Action:
+                  - "logs:CreateLogGroup"
+                  - "logs:CreateLogStream"
+                  - "logs:PutLogEvents"
+                Resource: "arn:aws:logs:*:*:*"
+              - Effect: Allow
+                Action:
+                  - "ec2:CreateNetworkInterface"
+                  - "ec2:DescribeNetworkInterfaces"
+                  - "ec2:DeleteNetworkInterface"
+                  - "ec2:AttachNetworkInterface"
+                  - "ec2:DetachNetworkInterface"
+                Resource: "*"
+
+  BackendLambda:
+    Type: AWS::Lambda::Function
+    Properties:
+      FunctionName: !Sub "${ProjectName}-backend-${Environment}"
+      Runtime: python3.9
+      Handler: lambda_function.lambda_handler
+      Code:
+        ZipFile: |
+          # Placeholder - será reemplazado durante el despliegue
+      Role: !GetAtt LambdaExecutionRole.Arn
+      Environment:
+        Variables:
+          DB_HOST: !GetAtt Database.Endpoint.Address
+          DB_PORT: !GetAtt Database.Endpoint.Port
+          DB_NAME: !Sub "${ProjectName}_${Environment}"
+          DB_USER: !Ref DBUsername
+          DB_PASSWORD: !Ref DBPassword
+          JWT_SECRET: !Ref JWTSecret
+      Timeout: 30
+      MemorySize: 512
+      Tags:
+        - Key: Environment
+          Value: !Ref Environment
+        - Key: Project
+          Value: !Ref ProjectName
+
+  # ==================== API GATEWAY ====================
+  ApiGateway:
+    Type: AWS::ApiGateway::RestApi
+    Properties:
+      Name: !Sub "${ProjectName}-api-${Environment}"
+      Description: "Colombia Explora REST API"
+      EndpointConfiguration:
+        Types:
+          - REGIONAL
+
+  ApiGatewayResource:
+    Type: AWS::ApiGateway::Resource
+    Properties:
+      RestApiId: !Ref ApiGateway
+      ParentId: !GetAtt ApiGateway.RootResourceId
+      PathPart: "{proxy+}"
+
+  ApiGatewayMethod:
+    Type: AWS::ApiGateway::Method
+    Properties:
+      RestApiId: !Ref ApiGateway
+      ResourceId: !Ref ApiGatewayResource
+      HttpMethod: ANY
+      AuthorizationType: NONE
+      Integration:
+        Type: AWS_PROXY
+        IntegrationHttpMethod: POST
+        Uri: !Sub
+          - "arn:aws:apigateway:${AWS::Region}:lambda:path/2015-03-31/functions/${LambdaArn}/invocations"
+          - LambdaArn: !GetAtt BackendLambda.Arn
+
+  ApiGatewayDeployment:
+    Type: AWS::ApiGateway::Deployment
+    DependsOn: ApiGatewayMethod
+    Properties:
+      RestApiId: !Ref ApiGateway
+      StageName: prod
+
+  LambdaApiPermission:
+    Type: AWS::Lambda::Permission
+    Properties:
+      FunctionName: !Ref BackendLambda
+      Action: "lambda:InvokeFunction"
+      Principal: apigateway.amazonaws.com
+      SourceArn: !Sub "${ApiGateway}/*/*"
+
+  # ==================== MONITORING & ALERTS ====================
+  SNSAlertTopic:
+    Type: AWS::SNS::Topic
+    Properties:
+      TopicName: !Sub "${ProjectName}-alerts-${Environment}"
+      Subscription:
+        - Protocol: email
+          Endpoint: !Ref AdminEmail
+
+  LambdaErrorsAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName: !Sub "${ProjectName}-lambda-errors-${Environment}"
+      AlarmDescription: "Alarma cuando hay errores en Lambda"
+      MetricName: Errors
+      Namespace: AWS/Lambda
+      Statistic: Sum
+      Period: 300
+      EvaluationPeriods: 1
+      Threshold: 1
+      ComparisonOperator: GreaterThanThreshold
+      AlarmActions:
+        - !Ref SNSAlertTopic
+      Dimensions:
+        - Name: FunctionName
+          Value: !Ref BackendLambda
+
+  RDSHighCPUAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName: !Sub "${ProjectName}-rds-cpu-${Environment}"
+      AlarmDescription: "Alarma cuando CPU de RDS excede 80%"
+      MetricName: CPUUtilization
+      Namespace: AWS/RDS
+      Statistic: Average
+      Period: 300
+      EvaluationPeriods: 2
+      Threshold: 80
+      ComparisonOperator: GreaterThanThreshold
+      AlarmActions:
+        - !Ref SNSAlertTopic
+      Dimensions:
+        - Name: DBInstanceIdentifier
+          Value: !Ref Database
+
+  RDSStorageAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName: !Sub "${ProjectName}-rds-storage-${Environment}"
+      AlarmDescription: "Alarma cuando almacenamiento de RDS excede 85%"
+      MetricName: FreeStorageSpace
+      Namespace: AWS/RDS
+      Statistic: Average
+      Period: 300
+      EvaluationPeriods: 2
+      Threshold: 3000000000
+      ComparisonOperator: LessThanThreshold
+      AlarmActions:
+        - !Ref SNSAlertTopic
+      Dimensions:
+        - Name: DBInstanceIdentifier
+          Value: !Ref Database
+
+Outputs:
+  FrontendURL:
+    Description: "URL del Frontend en CloudFront"
+    Value: !GetAtt CloudFrontDistribution.DomainName
+
+  FrontendS3URL:
+    Description: "URL del Frontend en S3"
+    Value: !GetAtt FrontendBucket.WebsiteURL
+
+  ApiGatewayURL:
+    Description: "URL del API Gateway"
+    Value: !Sub "https://${ApiGateway}.execute-api.${AWS::Region}.amazonaws.com/prod"
+
+  DatabaseEndpoint:
+    Description: "Endpoint de la base de datos RDS"
+    Value: !GetAtt Database.Endpoint.Address
+
+  DatabasePort:
+    Description: "Puerto de la base de datos"
+    Value: !GetAtt Database.Endpoint.Port
+
+  S3BucketName:
+    Description: "Nombre del bucket S3 para el frontend"
+    Value: !Ref FrontendBucket
+
+  LambdaFunctionName:
+    Description: "Nombre de la función Lambda"
+    Value: !Ref BackendLambda
+
+  SNSAlertTopicArn:
+    Description: "ARN del topic SNS para alertas"
+    Value: !Ref SNSAlertTopic
