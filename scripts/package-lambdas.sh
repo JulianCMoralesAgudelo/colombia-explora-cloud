@@ -34,4 +34,4 @@ mv function.zip ../deploy/
 rm -rf package
 
 echo "✅ Lambda empaquetada en: ../deploy/function.zip"
-echo "📊 Tamaño del paquete: $(du -h ../deploy/function.zip | cut -f1)"
+ls -lh ../deploy/function.zip
