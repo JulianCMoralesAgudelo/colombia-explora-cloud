@@ -3,7 +3,7 @@ import jwt
 import bcrypt
 from datetime import datetime, timedelta
 import os
-from db import get_db_connection
+from backend.db import get_db_connection
 import logging
 
 logger = logging.getLogger()
