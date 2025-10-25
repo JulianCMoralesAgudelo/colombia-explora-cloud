@@ -214,4 +214,11 @@ logs/
 
 # Local configuration
 config.local.*
-.env.local
+.env.localbackend/package/
+deploy/function.zip
+node_modules/
+
+# Colombia Explora - Dependencies
+backend/package/
+deploy/function.zip
+node_modules/
